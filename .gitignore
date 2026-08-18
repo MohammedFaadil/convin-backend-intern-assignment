@@ -1,6 +1,8 @@
 /server
+*.exe
 /bin
 .env
+*.log
 
 # assignment brief, not part of the submission
 candidate-brief.pdf
