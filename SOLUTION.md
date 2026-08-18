@@ -24,12 +24,21 @@ waits for HTTP handlers, and `Ingest` returns before its background work finishe
 mid-goroutine. Fixed together: the goroutine now runs on its own
 `context.WithTimeout(context.Background(), …)` instead of the request's context, a
 `sync.WaitGroup` tracks it, and a new `Service.Shutdown` blocks on that WaitGroup; `main`
-calls it right after `srv.Shutdown`, before the deferred closes.
+calls it right after `srv.Shutdown`, each with its own timeout so a slow HTTP drain can't
+eat into background work's window and reintroduce the same problem one layer up.
 
-**Found while reading, not in the incident report:** `Cache.Get` takes `c.mu.RLock`, but
-`Cache.Record` — the write path, hit on every ingest — never touched the mutex. 200
+**The rest of these I found by re-reviewing my own fix, not from the incident report.**
+`IngestEvent`'s insert, call upsert, and stats increment were still three separate
+statements: if the first committed and a later one failed for any transient reason,
+`Ingest` returned an error, the provider retried the same `event_id` on the non-2xx, and
+that retry would hit the unique constraint and be told "already seen" — with no call row
+and no stats behind it, silently gone for good. All three now run inside one transaction,
+so a failure partway rolls the event insert back too and a retry is treated as new
+(`TestIngestEventRollsBackOnFailurePartway` forces this with a `duration_sec` that
+overflows Postgres' `INT` column). Separately, `Cache.Get` takes `c.mu.RLock`, but
+`Cache.Record` — the write path, hit on every ingest — never touched the mutex; 200
 concurrent `Record` calls for one account landed on `CallCount = 191` locally, nine
-updates silently lost. Also, the cache started empty on every restart with nothing to
+updates silently lost. And the cache started empty on every restart with nothing to
 repopulate it, so stats visibly dropped to zero after every deploy despite `account_stats`
 in Postgres being correct throughout. Fixed the lock; added a startup step that loads
 `account_stats` into the cache before serving traffic.
