@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -16,12 +17,22 @@ import (
 // recordingWork stands in for downloading and transcoding a recording.
 const recordingWork = 50 * time.Millisecond
 
+// recordingTimeout bounds how long background recording processing gets to
+// run. It's independent of the HTTP request that triggered it, since that
+// request is long gone by the time this matters.
+const recordingTimeout = 10 * time.Second
+
 // Service ingests webhook deliveries.
 type Service struct {
 	store *store.Store
 	cache *stats.Cache
 	rdb   *redis.Client
 	log   *slog.Logger
+
+	// wg tracks recording-processing goroutines still running in the
+	// background, so Shutdown can wait for them instead of letting the
+	// process exit out from under them.
+	wg sync.WaitGroup
 }
 
 // New builds a Service.
@@ -76,11 +87,22 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 	}
 	s.cache.Record(rec.AccountID, rec.DurationSec)
 
-	// Recordings are slow to fetch, so that part does not block the provider.
+	// Recordings are slow to fetch, so that part does not block the
+	// provider. It gets a context of its own rather than ctx: ctx belongs
+	// to the HTTP request, and net/http cancels that the moment this
+	// handler returns - which is exactly what was cutting the download off
+	// before it could mark the recording processed. wg lets Shutdown wait
+	// for whatever's still running instead of letting it get killed
+	// mid-write when the process exits.
 	if rec.RecordingURL != "" {
+		s.wg.Add(1)
 		go func() {
-			if err := s.processRecording(ctx, rec); err != nil {
-				// TODO: handle
+			defer s.wg.Done()
+			bg, cancel := context.WithTimeout(context.Background(), recordingTimeout)
+			defer cancel()
+			if err := s.processRecording(bg, rec); err != nil {
+				s.log.Error("process recording failed",
+					"event_id", rec.EventID, "call_id", rec.CallID, "err", err)
 			}
 		}()
 	}
@@ -93,4 +115,23 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 func (s *Service) processRecording(ctx context.Context, rec store.Event) error {
 	time.Sleep(recordingWork)
 	return s.store.MarkRecordingProcessed(ctx, rec.CallID)
+}
+
+// Shutdown waits for recording-processing goroutines started by Ingest to
+// finish, or for ctx to expire, whichever comes first. Call it after the
+// HTTP server has stopped accepting new work but before closing the store
+// or Redis connections those goroutines still need.
+func (s *Service) Shutdown(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

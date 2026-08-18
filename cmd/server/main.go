@@ -60,4 +60,12 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown", "err", err)
 	}
+
+	// srv.Shutdown only waits for HTTP handlers to return, and Ingest
+	// returns before its background recording work is done. Wait for that
+	// too - same deadline, whatever's left of it - before the deferred
+	// store/redis closes above run and pull the rug out from under it.
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		log.Error("background work did not finish before shutdown timeout", "err", err)
+	}
 }

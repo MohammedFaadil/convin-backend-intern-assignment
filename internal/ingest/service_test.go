@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/convin/webhook-ingest/internal/ingest"
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
 
@@ -185,5 +186,47 @@ func TestRecordingIsMarkedProcessedAfterRequestReturns(t *testing.T) {
 	}
 	if !processed {
 		t.Fatal("recording_processed never became true after the handler returned")
+	}
+}
+
+// TestShutdownWaitsForInFlightRecordingProcessing goes at the service
+// directly rather than through an HTTP request, so ctx here is
+// context.Background() for the whole test - it never gets cancelled the way
+// a request's context does. That isolates what this test is actually
+// checking: that Shutdown blocks on the background goroutine's WaitGroup
+// instead of returning immediately. Shutdown returning is the only signal
+// the caller (main, on SIGTERM) gets that it's now safe to close the store
+// and Redis connections that goroutine depends on.
+func TestShutdownWaitsForInFlightRecordingProcessing(t *testing.T) {
+	svc, st := testutil.NewService(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+
+	evt := ingest.Event{
+		EventID:      eventID,
+		CallID:       callID,
+		AccountID:    accountID,
+		Status:       "completed",
+		DurationSec:  5,
+		RecordingURL: "https://recordings.example.com/" + callID + ".wav",
+		OccurredAt:   time.Now(),
+	}
+	if err := svc.Ingest(context.Background(), evt); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	var processed bool
+	row := st.Pool().QueryRow(context.Background(),
+		`SELECT recording_processed FROM calls WHERE call_id = $1`, callID)
+	if err := row.Scan(&processed); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected recording_processed to already be true once Shutdown returns")
 	}
 }
