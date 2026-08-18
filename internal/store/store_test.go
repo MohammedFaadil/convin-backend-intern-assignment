@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/convin/webhook-ingest/internal/store"
@@ -120,9 +121,15 @@ func TestIngestEventRollsBackOnFailurePartway(t *testing.T) {
 	eventID, callID, accountID := testutil.IDs(t, s)
 	ctx := context.Background()
 
+	// Computed rather than a literal so the overflow is a runtime concern
+	// on this (amd64/arm64) build, not a "constant overflows int" compile
+	// error on a 32-bit GOARCH where int itself is only 32 bits wide.
+	var outOfRange int64 = math.MaxInt32
+	outOfRange++
+
 	bad := store.Event{
 		EventID: eventID, CallID: callID, AccountID: accountID,
-		Status: "completed", DurationSec: 3_000_000_000, // overflows calls.duration_sec (int4)
+		Status: "completed", DurationSec: int(outOfRange), // overflows calls.duration_sec (int4)
 		Payload: []byte(`{}`),
 	}
 	if _, err := s.IngestEvent(ctx, bad); err == nil {

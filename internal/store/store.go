@@ -13,10 +13,10 @@ import (
 
 // querier is satisfied by both *pgxpool.Pool and pgx.Tx, so the statement
 // helpers below can run standalone or as part of a transaction without
-// being written twice.
+// being written twice. Only Exec, because that's all insertEventIfNew,
+// upsertCall, and incrementAccountStats need.
 type querier interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 // Event is one call-completion webhook delivery.
@@ -165,6 +165,13 @@ func (s *Store) IncrementAccountStats(ctx context.Context, accountID string, dur
 // means a failure partway rolls back the events insert too, so a retry
 // after a partial failure is treated as new and the whole sequence runs
 // again instead of being waved through as "already handled".
+//
+// Trade-off worth knowing: concurrent redeliveries of the same event_id now
+// block on the winner's whole transaction (insert, upsert, increment,
+// commit) instead of just its first statement. That's a deliberate choice -
+// simultaneous redelivery of the exact same event is the rare case, the
+// transaction is three fast statements, and losing atomicity to shave that
+// window would bring back the silent-drop failure mode above.
 func (s *Store) IngestEvent(ctx context.Context, e Event) (inserted bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
