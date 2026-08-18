@@ -3,8 +3,10 @@ package testutil
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -24,9 +26,20 @@ import (
 // database, so tests must never truncate shared tables. Every row carries an
 // account_id, so deleting by account removes exactly this test's data and
 // nothing else.
+//
+// The IDs carry a random suffix on top of the test name, not just the name
+// itself: Ingest's Redis dedupe key is keyed by event_id and outlives a
+// single test run (it has its own TTL, and nothing here clears it), so a
+// second run of the exact same test - a repeat go test invocation, `-count`
+// above 1 - would reuse the same event_id, find it already marked "seen" in
+// Redis from last time, and every assertion downstream of that would be
+// wrong despite Postgres having been cleaned up correctly. A fresh suffix
+// each run sidesteps that instead of trying to track down and clear
+// whatever Redis state a given test happened to leave behind.
 func IDs(t *testing.T, s *store.Store) (eventID, callID, accountID string) {
 	t.Helper()
 	base := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+	base = fmt.Sprintf("%s_%08x", base, rand.Uint32())
 	eventID, callID, accountID = "evt_"+base, "call_"+base, "acc_"+base
 
 	clean := func() {
