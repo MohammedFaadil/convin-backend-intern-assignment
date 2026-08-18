@@ -58,8 +58,10 @@ func (s *Service) Stats(accountID string) stats.AccountStats {
 // The provider redelivers at least once, so this has to tolerate the same
 // event_id arriving twice - including two copies arriving at the same time.
 // Postgres is the source of truth for that: events.event_id is unique, and
-// InsertEventIfNew both checks and inserts in one round trip, so there's no
-// gap for two concurrent deliveries to both slip through.
+// IngestEvent both checks and inserts in the same transaction as the call
+// upsert and the stats update, so there's no gap for two concurrent
+// deliveries to both slip through, and no way for a failure partway to
+// leave an event marked seen with nothing to show for it.
 //
 // Redis sits in front of that check purely as a fast path. A dedupe key is
 // only ever written after Postgres has confirmed the insert, so a hit in
@@ -97,7 +99,13 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 		Payload:      payload,
 	}
 
-	inserted, err := s.store.InsertEventIfNew(ctx, rec)
+	// IngestEvent stores the event, upserts the call, and folds the call
+	// into account_stats as one transaction, so a failure partway through
+	// (a dropped connection between the insert and the stats update, say)
+	// rolls back the event insert too. Without that, a redelivery after a
+	// partial failure would hit the unique constraint, be told it's a
+	// duplicate, and the call would be silently dropped rather than retried.
+	inserted, err := s.store.IngestEvent(ctx, rec)
 	if err != nil {
 		return err
 	}
@@ -105,13 +113,6 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 		s.log.Info("duplicate delivery ignored", "event_id", evt.EventID, "source", "postgres")
 		s.markSeen(ctx, dedupeKey)
 		return nil
-	}
-
-	if err := s.store.UpsertCall(ctx, rec); err != nil {
-		return err
-	}
-	if err := s.store.IncrementAccountStats(ctx, rec.AccountID, rec.DurationSec); err != nil {
-		return err
 	}
 	s.cache.Record(rec.AccountID, rec.DurationSec)
 	s.markSeen(ctx, dedupeKey)
