@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
@@ -152,5 +153,37 @@ func TestConcurrentRedeliveryDoesNotDoubleCount(t *testing.T) {
 	}
 	if totalDuration != 143 {
 		t.Fatalf("account_stats.total_duration_sec = %d, want 143 (one call's worth, not %d)", totalDuration, deliveries)
+	}
+}
+
+// TestRecordingIsMarkedProcessedAfterRequestReturns posts a webhook with a
+// recording_url and then polls the database, the same way an operator
+// watching the dashboard would. Recording processing is deliberately
+// asynchronous - the handler returns before it's done - so the assertion
+// has to wait for it rather than checking immediately after post() returns.
+func TestRecordingIsMarkedProcessedAfterRequestReturns(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var processed bool
+	for time.Now().Before(deadline) {
+		row := st.Pool().QueryRow(ctx, `SELECT recording_processed FROM calls WHERE call_id = $1`, callID)
+		if err := row.Scan(&processed); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if processed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !processed {
+		t.Fatal("recording_processed never became true after the handler returned")
 	}
 }
