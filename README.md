@@ -5,10 +5,10 @@ stores them, and updates per-account call statistics.
 
 It is in production. It is misbehaving.
 
-**Status:** the defects below are fixed and ingestion is now idempotent under
+**Status:** I've fixed the defects below and made ingestion idempotent under
 concurrent redelivery. See [`SOLUTION.md`](SOLUTION.md) for what was wrong, why,
-and the reasoning behind the fixes. The rest of this file is otherwise the
-original brief, kept as received.
+and the reasoning behind my fixes. The rest of this file is otherwise the
+original brief, kept as I received it.
 
 ## The incident
 
