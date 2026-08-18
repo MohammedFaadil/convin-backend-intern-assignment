@@ -67,9 +67,9 @@ durable row after the first delivery and confirming Postgres is never re-inserte
 
 ## At 10,000 webhooks/second
 
-Today's path does up to four synchronous round trips (Redis check, insert event, upsert
-call, increment stats) before acking — fine at low volume, not at 10k/sec. In order of
-impact, I'd:
+Today's path does a Redis check, then a Postgres transaction (insert, upsert, increment,
+commit), then a Redis write — several synchronous round trips before acking. Fine at low
+volume, not at 10k/sec. In order of impact, I'd:
 
 1. **Take the DB off the request path** — validate, durably enqueue (Kafka / Redis
    Streams / SQS), ack. Workers handle the writes and recording processing, so ingestion
