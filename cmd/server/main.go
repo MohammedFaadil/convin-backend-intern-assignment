@@ -61,17 +61,22 @@ func main() {
 	<-stop
 
 	log.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+
+	httpCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	if err := srv.Shutdown(httpCtx); err != nil {
 		log.Error("shutdown", "err", err)
 	}
 
 	// srv.Shutdown only waits for HTTP handlers to return, and Ingest
 	// returns before its background recording work is done. Wait for that
-	// too - same deadline, whatever's left of it - before the deferred
-	// store/redis closes above run and pull the rug out from under it.
-	if err := svc.Shutdown(shutdownCtx); err != nil {
+	// too, on its own timeout rather than whatever's left of the one above -
+	// a slow HTTP drain shouldn't shrink the window background work gets
+	// before the deferred store/redis closes below pull the rug out from
+	// under it, which is the exact failure this exists to prevent.
+	bgCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := svc.Shutdown(bgCtx); err != nil {
 		log.Error("background work did not finish before shutdown timeout", "err", err)
 	}
 }
