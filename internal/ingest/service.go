@@ -22,6 +22,13 @@ const recordingWork = 50 * time.Millisecond
 // request is long gone by the time this matters.
 const recordingTimeout = 10 * time.Second
 
+// dedupeTTL is how long a confirmed event_id is kept in the Redis fast
+// path. It only needs to outlast the provider's redelivery window - letting
+// an entry expire early just costs a Postgres round trip on the next
+// redelivery, it doesn't cause a double-count, so this is deliberately
+// generous.
+const dedupeTTL = 24 * time.Hour
+
 // Service ingests webhook deliveries.
 type Service struct {
 	store *store.Store
@@ -50,10 +57,30 @@ func (s *Service) Stats(accountID string) stats.AccountStats {
 //
 // The provider redelivers at least once, so this has to tolerate the same
 // event_id arriving twice - including two copies arriving at the same time.
-// events.event_id is unique, and InsertEventIfNew both checks and inserts in
-// one round trip, so there's no gap between "is this new" and "store it"
-// for two concurrent deliveries to both slip through.
+// Postgres is the source of truth for that: events.event_id is unique, and
+// InsertEventIfNew both checks and inserts in one round trip, so there's no
+// gap for two concurrent deliveries to both slip through.
+//
+// Redis sits in front of that check purely as a fast path. A dedupe key is
+// only ever written after Postgres has confirmed the insert, so a hit in
+// Redis is always trustworthy - it can save a round trip to Postgres, but it
+// can never cause a new event to be dropped. A miss (cold cache, eviction,
+// expired TTL, Redis being down) just means falling through to the Postgres
+// check, which is correct on its own. Deleting the Redis layer entirely
+// would only cost latency under heavy redelivery, not correctness.
 func (s *Service) Ingest(ctx context.Context, evt Event) error {
+	dedupeKey := "webhook-ingest:seen-event:" + evt.EventID
+
+	if s.rdb != nil {
+		seen, err := s.rdb.Exists(ctx, dedupeKey).Result()
+		if err != nil {
+			s.log.Warn("redis dedupe check failed, falling back to postgres", "event_id", evt.EventID, "err", err)
+		} else if seen > 0 {
+			s.log.Info("duplicate delivery ignored", "event_id", evt.EventID, "source", "redis")
+			return nil
+		}
+	}
+
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		return err
@@ -75,7 +102,8 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 		return err
 	}
 	if !inserted {
-		s.log.Info("duplicate delivery ignored", "event_id", evt.EventID)
+		s.log.Info("duplicate delivery ignored", "event_id", evt.EventID, "source", "postgres")
+		s.markSeen(ctx, dedupeKey)
 		return nil
 	}
 
@@ -86,6 +114,7 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 		return err
 	}
 	s.cache.Record(rec.AccountID, rec.DurationSec)
+	s.markSeen(ctx, dedupeKey)
 
 	// Recordings are slow to fetch, so that part does not block the
 	// provider. It gets a context of its own rather than ctx: ctx belongs
@@ -115,6 +144,20 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 func (s *Service) processRecording(ctx context.Context, rec store.Event) error {
 	time.Sleep(recordingWork)
 	return s.store.MarkRecordingProcessed(ctx, rec.CallID)
+}
+
+// markSeen records a confirmed-durable event_id in Redis so the next
+// redelivery can skip Postgres. Best-effort: on failure the dedupe key
+// simply doesn't get cached, and the next redelivery pays for a Postgres
+// round trip it would otherwise have avoided. That's the only consequence -
+// Postgres remains the authority regardless of whether this succeeds.
+func (s *Service) markSeen(ctx context.Context, key string) {
+	if s.rdb == nil {
+		return
+	}
+	if err := s.rdb.Set(ctx, key, 1, dedupeTTL).Err(); err != nil {
+		s.log.Warn("redis dedupe write failed", "key", key, "err", err)
+	}
 }
 
 // Shutdown waits for recording-processing goroutines started by Ingest to

@@ -230,3 +230,39 @@ func TestShutdownWaitsForInFlightRecordingProcessing(t *testing.T) {
 		t.Fatal("expected recording_processed to already be true once Shutdown returns")
 	}
 }
+
+// TestRedisFastPathTrustsEarlierConfirmation checks that the Redis dedupe
+// key is actually consulted, not just written. It deletes the durable
+// events row behind the service's back after the first delivery - if
+// Postgres were being asked again on the redelivery below, it would see no
+// matching event_id and happily insert a second one. It stays at zero rows
+// instead, which is only possible if Redis's "already seen" answer short-
+// circuited the request before Postgres was ever asked.
+func TestRedisFastPathTrustsEarlierConfirmation(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first delivery: got %d, want 200", resp.StatusCode)
+	}
+
+	if _, err := st.Pool().Exec(ctx, `DELETE FROM events WHERE event_id = $1`, eventID); err != nil {
+		t.Fatalf("delete event: %v", err)
+	}
+
+	if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("redelivery: got %d, want 200", resp.StatusCode)
+	}
+
+	var n int
+	row := st.Pool().QueryRow(ctx, `SELECT count(*) FROM events WHERE event_id = $1`, eventID)
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("events has %d rows for %s after the redelivery, want 0 - "+
+			"postgres was re-inserted into, so the redis dedupe key was not actually checked", n, eventID)
+	}
+}
