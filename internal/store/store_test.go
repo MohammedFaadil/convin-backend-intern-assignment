@@ -26,8 +26,12 @@ func TestInsertEventThenExists(t *testing.T) {
 		t.Fatal("expected event to be absent before insert")
 	}
 
-	if err := s.InsertEvent(ctx, evt); err != nil {
-		t.Fatalf("InsertEvent: %v", err)
+	inserted, err := s.InsertEventIfNew(ctx, evt)
+	if err != nil {
+		t.Fatalf("InsertEventIfNew: %v", err)
+	}
+	if !inserted {
+		t.Fatal("expected the first delivery to insert a new row")
 	}
 
 	exists, err = s.EventExists(ctx, eventID)
@@ -36,6 +40,14 @@ func TestInsertEventThenExists(t *testing.T) {
 	}
 	if !exists {
 		t.Fatal("expected event to exist after insert")
+	}
+
+	inserted, err = s.InsertEventIfNew(ctx, evt)
+	if err != nil {
+		t.Fatalf("InsertEventIfNew on redelivery: %v", err)
+	}
+	if inserted {
+		t.Fatal("expected a redelivery of the same event_id to be rejected by the unique constraint")
 	}
 }
 
