@@ -72,6 +72,28 @@ func TestIncrementAccountStatsAccumulates(t *testing.T) {
 	}
 }
 
+func TestAllAccountStatsReturnsEveryAccount(t *testing.T) {
+	s := testutil.NewStore(t)
+	_, _, accountID := testutil.IDs(t, s)
+	ctx := context.Background()
+
+	if err := s.IncrementAccountStats(ctx, accountID, 30); err != nil {
+		t.Fatalf("IncrementAccountStats: %v", err)
+	}
+
+	all, err := s.AllAccountStats(ctx)
+	if err != nil {
+		t.Fatalf("AllAccountStats: %v", err)
+	}
+	got, ok := all[accountID]
+	if !ok {
+		t.Fatalf("expected %s in the result", accountID)
+	}
+	if got.CallCount != 1 || got.TotalDurationSec != 30 {
+		t.Fatalf("got %+v, want CallCount=1 TotalDurationSec=30", got)
+	}
+}
+
 func TestUpsertCallThenMarkRecordingProcessed(t *testing.T) {
 	s := testutil.NewStore(t)
 	eventID, callID, accountID := testutil.IDs(t, s)

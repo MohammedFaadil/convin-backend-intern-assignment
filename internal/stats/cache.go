@@ -48,3 +48,17 @@ func (c *Cache) Record(accountID string, durationSec int) {
 	s.CallCount++
 	s.TotalDurationSec += int64(durationSec)
 }
+
+// Seed loads durable totals into the cache in one pass, replacing whatever
+// is already there for those accounts. Meant to be called once at startup,
+// before the cache is serving traffic, so GET /accounts/{id}/stats reads
+// real numbers immediately instead of zeroes until fresh events arrive.
+func (c *Cache) Seed(totals map[string]AccountStats) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for accountID, total := range totals {
+		v := total
+		c.m[accountID] = &v
+	}
+}

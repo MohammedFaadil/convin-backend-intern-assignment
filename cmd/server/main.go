@@ -39,7 +39,13 @@ func main() {
 	}
 	defer func() { _ = rdb.Close() }()
 
-	svc := ingest.New(st, stats.NewCache(), rdb, log)
+	cache := stats.NewCache()
+	if err := hydrateCache(ctx, st, cache); err != nil {
+		log.Error("load account stats", "err", err)
+		os.Exit(1)
+	}
+
+	svc := ingest.New(st, cache, rdb, log)
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewRouter(svc, log)}
 
 	go func() {
@@ -68,4 +74,24 @@ func main() {
 	if err := svc.Shutdown(shutdownCtx); err != nil {
 		log.Error("background work did not finish before shutdown timeout", "err", err)
 	}
+}
+
+// hydrateCache seeds the in-memory stats cache from the durable aggregate,
+// so GET /accounts/{id}/stats reflects reality immediately after a restart
+// instead of reading back to zero until fresh events repopulate it.
+func hydrateCache(ctx context.Context, st *store.Store, cache *stats.Cache) error {
+	totals, err := st.AllAccountStats(ctx)
+	if err != nil {
+		return err
+	}
+
+	seed := make(map[string]stats.AccountStats, len(totals))
+	for accountID, total := range totals {
+		seed[accountID] = stats.AccountStats{
+			CallCount:        total.CallCount,
+			TotalDurationSec: total.TotalDurationSec,
+		}
+	}
+	cache.Seed(seed)
+	return nil
 }
