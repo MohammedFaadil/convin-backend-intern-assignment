@@ -1,6 +1,6 @@
 # webhook-ingest
 
-A Go service that receives call-completion webhooks from our telephony provider,
+A Go service that receives call-completion webhooks from our telephony providers,
 stores them, and updates per-account call statistics.
 
 It is in production. It is misbehaving.
