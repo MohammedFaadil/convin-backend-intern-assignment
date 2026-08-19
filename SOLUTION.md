@@ -10,7 +10,7 @@ assumption between the two calls — two copies of the same event arriving close
 committed, and both would insert and increment `account_stats`. I noticed the existing
 `TestDuplicateDeliveryIsIgnored` sends its redeliveries one at a time, so it never opens
 the race window, so I wrote a test that fires 20 copies at once instead
-(`TestConcurrentRedeliveryDoesNotDoubleCount`) to reproduce the bug before touching the fix.
+(`TestConcurrentRedeliveryDoesNotDoubleCount`) to reproduce the bug before touching the actual fix.
 
 **Recordings never marked processed, nothing logged.** I traced this to `processRecording`
 running in a goroutine that held onto the *request's* `ctx`. `net/http` cancels that
